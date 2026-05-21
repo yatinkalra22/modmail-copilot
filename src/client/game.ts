@@ -1,189 +1,229 @@
 import {
   ApiEndpoint,
-  type DecrementRequest,
-  type DecrementResponse,
   type GeminiPingResponse,
-  type IncrementRequest,
-  type IncrementResponse,
   type InitResponse,
+  type LastActionResponse,
   type LastModMailResponse,
   type LastTriageResponse,
+  type TriageRecord,
+  type ActionRecord,
 } from "../shared/api.ts";
 import { navigateTo } from "@devvit/web/client";
 
-const counterValueElement = document.getElementById(
-  "counter-value",
-) as HTMLSpanElement;
-const incrementButton = document.getElementById(
-  "increment-button",
-) as HTMLButtonElement;
-const decrementButton = document.getElementById(
-  "decrement-button",
-) as HTMLButtonElement;
+function $<T extends HTMLElement>(id: string): T {
+  const el = document.getElementById(id);
+  if (!el) throw new Error(`missing #${id}`);
+  return el as T;
+}
 
-const docsLink = document.getElementById("docs-link") as HTMLDivElement;
-const playtestLink = document.getElementById("playtest-link") as HTMLDivElement;
-const discordLink = document.getElementById("discord-link") as HTMLDivElement;
+const titleEl = $<HTMLElement>("title");
 
-docsLink.addEventListener("click", () => {
-  navigateTo("https://developers.reddit.com/docs");
-});
+const docsLink = $<HTMLDivElement>("docs-link");
+const playtestLink = $<HTMLDivElement>("playtest-link");
+const discordLink = $<HTMLDivElement>("discord-link");
 
-playtestLink.addEventListener("click", () => {
-  navigateTo("https://www.reddit.com/r/Devvit");
-});
+docsLink.addEventListener("click", () =>
+  navigateTo("https://developers.reddit.com/docs"),
+);
+playtestLink.addEventListener("click", () =>
+  navigateTo("https://www.reddit.com/r/Devvit"),
+);
+discordLink.addEventListener("click", () =>
+  navigateTo("https://discord.com/invite/R7yu2wh9Qz"),
+);
 
-discordLink.addEventListener("click", () => {
-  navigateTo("https://discord.com/invite/R7yu2wh9Qz");
-});
-
-const titleElement = document.getElementById("title") as HTMLHeadingElement;
-
-let currentPostId: string | null = null;
-const incrementAmount = 1;
-const decrementAmount = 1;
-
-async function fetchInitialCount() {
+async function fetchInit(): Promise<void> {
   try {
-    const response = await fetch(ApiEndpoint.Init);
-    if (!response.ok) {
-      throw new Error(`HTTP error! status: ${response.status}`);
-    }
-    const data = (await response.json()) as InitResponse;
+    const res = await fetch(ApiEndpoint.Init);
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const data = (await res.json()) as InitResponse;
     if (data.type === "init") {
-      counterValueElement.textContent = data.count.toString();
-      currentPostId = data.postId; // Store postId for later use
-      titleElement.textContent = `Hey ${data.username} 👋`;
-    } else {
-      console.error(`Invalid response type from ${ApiEndpoint.Init}`, data);
-      counterValueElement.textContent = "Error";
+      titleEl.textContent = `Hey ${data.username} 👋`;
     }
-  } catch (error) {
-    console.error("Error fetching initial count:", error);
-    counterValueElement.textContent = "Error";
+  } catch (err) {
+    console.error("init failed", err);
+    titleEl.textContent = "Hey moderator 👋";
   }
 }
 
-async function updateCounter(action: "increment" | "decrement", amount = 1) {
-  if (!currentPostId) {
-    console.error("Cannot update counter: postId is not initialized.");
-    // Optionally, you could try to re-initialize or show an error to the user.
+const geminiPingBtn = $<HTMLButtonElement>("gemini-ping-button");
+const geminiPingOut = $<HTMLPreElement>("gemini-ping-output");
+
+geminiPingBtn.addEventListener("click", async () => {
+  geminiPingBtn.disabled = true;
+  geminiPingOut.textContent = "Calling Gemini…";
+  try {
+    const res = await fetch(ApiEndpoint.GeminiPing, { method: "POST" });
+    const data = (await res.json()) as GeminiPingResponse;
+    geminiPingOut.textContent = JSON.stringify(data, null, 2);
+  } catch (err) {
+    geminiPingOut.textContent = `client error: ${err instanceof Error ? err.message : String(err)}`;
+  } finally {
+    geminiPingBtn.disabled = false;
+  }
+});
+
+const lastModmailBtn = $<HTMLButtonElement>("last-modmail-button");
+const lastModmailOut = $<HTMLPreElement>("last-modmail-output");
+
+lastModmailBtn.addEventListener("click", async () => {
+  lastModmailBtn.disabled = true;
+  lastModmailOut.textContent = "Fetching…";
+  try {
+    const res = await fetch(ApiEndpoint.LastModMail);
+    const data = (await res.json()) as LastModMailResponse;
+    if (data.payload == null) {
+      lastModmailOut.textContent =
+        "No modmail trigger received yet. Send a modmail to the sub.";
+    } else {
+      const age = data.receivedAt ? formatAge(data.receivedAt) : "unknown";
+      lastModmailOut.textContent = `received ${age}\n\n${JSON.stringify(
+        data.payload,
+        null,
+        2,
+      )}`;
+    }
+  } catch (err) {
+    lastModmailOut.textContent = `client error: ${err instanceof Error ? err.message : String(err)}`;
+  } finally {
+    lastModmailBtn.disabled = false;
+  }
+});
+
+function formatAge(ts: number): string {
+  const secs = Math.max(0, Math.round((Date.now() - ts) / 1000));
+  if (secs < 60) return `${secs}s ago`;
+  const mins = Math.round(secs / 60);
+  if (mins < 60) return `${mins}m ago`;
+  const hrs = Math.round(mins / 60);
+  return `${hrs}h ago`;
+}
+
+const triageEmpty = $<HTMLDivElement>("triage-empty");
+const triageView = $<HTMLDivElement>("triage-view");
+const triageIntent = $<HTMLSpanElement>("triage-intent");
+const triageConfidence = $<HTMLSpanElement>("triage-confidence");
+const triageAge = $<HTMLSpanElement>("triage-age");
+const triageSummary = $<HTMLParagraphElement>("triage-summary");
+const triageUser = $<HTMLDivElement>("triage-user");
+const triageAction = $<HTMLElement>("triage-action");
+const triageDraft = $<HTMLQuoteElement>("triage-draft");
+const triageRaw = $<HTMLPreElement>("triage-raw");
+const triageRefreshBtn = $<HTMLButtonElement>("last-triage-button");
+
+function renderTriage(record: TriageRecord | null): void {
+  if (!record) {
+    triageView.hidden = true;
+    triageEmpty.hidden = false;
     return;
   }
 
-  const body =
-    action === "increment"
-      ? JSON.stringify({ amount } satisfies IncrementRequest)
-      : JSON.stringify({ amount } satisfies DecrementRequest);
-  try {
-    const response = await fetch(
-      action === "increment" ? ApiEndpoint.Increment : ApiEndpoint.Decrement,
-      {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-        },
-        // The server uses request context for post ID; amount comes from the body.
-        body,
-      },
-    );
-    if (!response.ok) {
-      throw new Error(`HTTP error! status: ${response.status}`);
-    }
-    const data = (await response.json()) as
-      | IncrementResponse
-      | DecrementResponse;
-    counterValueElement.textContent = data.count.toString();
-  } catch (error) {
-    console.error(`Error ${action}ing count:`, error);
-    // Optionally, display an error message to the user in the UI
+  triageEmpty.hidden = true;
+  triageView.hidden = false;
+  triageAge.textContent = formatAge(record.receivedAt);
+  triageRaw.textContent = JSON.stringify(record, null, 2);
+
+  if (record.kind === "success") {
+    triageIntent.textContent = record.triage.intent;
+    triageIntent.setAttribute("data-intent", record.triage.intent);
+    triageConfidence.textContent = `${Math.round(
+      record.triage.confidence * 100,
+    )}% confidence`;
+    triageSummary.textContent = record.triage.summary;
+    const u = record.input.userContext;
+    triageUser.textContent = `u/${u.username} • ${u.accountAgeDays}d • karma ${u.karma}${u.isCurrentlyBanned ? " • BANNED" : ""}${u.isApproved ? " • approved" : ""} • ${u.recentCommentsInSub} recent comments`;
+    triageAction.textContent = record.triage.suggestedAction;
+    triageDraft.textContent = record.triage.draftReply;
+  } else if (record.kind === "skipped") {
+    triageIntent.textContent = "skipped";
+    triageIntent.setAttribute("data-intent", "other");
+    triageConfidence.textContent = "";
+    triageSummary.textContent = `Skipped: ${record.reason}`;
+    triageUser.textContent = `convo ${record.conversationId}`;
+    triageAction.textContent = "—";
+    triageDraft.textContent = "—";
+  } else {
+    triageIntent.textContent = "error";
+    triageIntent.setAttribute("data-intent", "hostile");
+    triageConfidence.textContent = `stage: ${record.stage}`;
+    triageSummary.textContent = record.error;
+    triageUser.textContent = record.input
+      ? `u/${record.input.userContext.username}`
+      : "—";
+    triageAction.textContent = "—";
+    triageDraft.textContent = "—";
   }
 }
 
-incrementButton.addEventListener("click", () =>
-  updateCounter("increment", incrementAmount),
-);
-decrementButton.addEventListener("click", () =>
-  updateCounter("decrement", decrementAmount),
-);
-
-const geminiPingButton = document.getElementById(
-  "gemini-ping-button",
-) as HTMLButtonElement;
-const geminiPingOutput = document.getElementById(
-  "gemini-ping-output",
-) as HTMLPreElement;
-
-geminiPingButton.addEventListener("click", async () => {
-  geminiPingButton.disabled = true;
-  geminiPingOutput.textContent = "Calling Gemini…";
+async function loadTriage(): Promise<void> {
+  triageRefreshBtn.disabled = true;
   try {
-    const response = await fetch(ApiEndpoint.GeminiPing, { method: "POST" });
-    const data = (await response.json()) as GeminiPingResponse;
-    geminiPingOutput.textContent = JSON.stringify(data, null, 2);
+    const res = await fetch(ApiEndpoint.LastTriage);
+    const data = (await res.json()) as LastTriageResponse;
+    renderTriage(data.record);
   } catch (err) {
-    geminiPingOutput.textContent = `client error: ${err instanceof Error ? err.message : String(err)}`;
+    triageEmpty.hidden = false;
+    triageEmpty.textContent = `client error: ${err instanceof Error ? err.message : String(err)}`;
+    triageView.hidden = true;
   } finally {
-    geminiPingButton.disabled = false;
+    triageRefreshBtn.disabled = false;
   }
-});
+}
 
-const lastModmailButton = document.getElementById(
-  "last-modmail-button",
-) as HTMLButtonElement;
-const lastModmailOutput = document.getElementById(
-  "last-modmail-output",
-) as HTMLPreElement;
+triageRefreshBtn.addEventListener("click", loadTriage);
 
-lastModmailButton.addEventListener("click", async () => {
-  lastModmailButton.disabled = true;
-  lastModmailOutput.textContent = "Fetching…";
+const actionEmpty = $<HTMLDivElement>("action-empty");
+const actionView = $<HTMLDivElement>("action-view");
+const actionKind = $<HTMLSpanElement>("action-kind");
+const actionStatus = $<HTMLSpanElement>("action-status");
+const actionAge = $<HTMLSpanElement>("action-age");
+const actionDetails = $<HTMLParagraphElement>("action-details");
+const actionRaw = $<HTMLPreElement>("action-raw");
+const actionRefreshBtn = $<HTMLButtonElement>("last-action-button");
+
+function renderAction(record: ActionRecord | null): void {
+  if (!record) {
+    actionView.hidden = true;
+    actionEmpty.hidden = false;
+    return;
+  }
+
+  actionEmpty.hidden = true;
+  actionView.hidden = false;
+  actionAge.textContent = formatAge(record.receivedAt);
+  actionRaw.textContent = JSON.stringify(record, null, 2);
+  actionStatus.textContent = record.kind;
+  actionStatus.setAttribute("data-status", record.kind);
+
+  if (record.kind === "success") {
+    actionKind.textContent = `!${record.action}`;
+    actionDetails.textContent = record.details;
+  } else if (record.kind === "error") {
+    actionKind.textContent = `!${record.action}`;
+    actionDetails.textContent = record.error;
+  } else {
+    actionKind.textContent = "—";
+    actionDetails.textContent = record.reason;
+  }
+}
+
+async function loadAction(): Promise<void> {
+  actionRefreshBtn.disabled = true;
   try {
-    const response = await fetch(ApiEndpoint.LastModMail);
-    const data = (await response.json()) as LastModMailResponse;
-    if (data.payload == null) {
-      lastModmailOutput.textContent =
-        "No modmail trigger received yet. Send a modmail to the sub.";
-    } else {
-      const age = data.receivedAt
-        ? `${Math.round((Date.now() - data.receivedAt) / 1000)}s ago`
-        : "unknown";
-      lastModmailOutput.textContent = `received ${age}\n\n${JSON.stringify(data.payload, null, 2)}`;
-    }
+    const res = await fetch(ApiEndpoint.LastAction);
+    const data = (await res.json()) as LastActionResponse;
+    renderAction(data.record);
   } catch (err) {
-    lastModmailOutput.textContent = `client error: ${err instanceof Error ? err.message : String(err)}`;
+    actionEmpty.hidden = false;
+    actionEmpty.textContent = `client error: ${err instanceof Error ? err.message : String(err)}`;
+    actionView.hidden = true;
   } finally {
-    lastModmailButton.disabled = false;
+    actionRefreshBtn.disabled = false;
   }
-});
+}
 
-const lastTriageButton = document.getElementById(
-  "last-triage-button",
-) as HTMLButtonElement;
-const lastTriageOutput = document.getElementById(
-  "last-triage-output",
-) as HTMLPreElement;
+actionRefreshBtn.addEventListener("click", loadAction);
 
-lastTriageButton.addEventListener("click", async () => {
-  lastTriageButton.disabled = true;
-  lastTriageOutput.textContent = "Fetching…";
-  try {
-    const response = await fetch(ApiEndpoint.LastTriage);
-    const data = (await response.json()) as LastTriageResponse;
-    const record = data.record;
-    if (record == null) {
-      lastTriageOutput.textContent =
-        "No triage yet. Send a modmail from a non-mod account.";
-    } else {
-      const age = `${Math.round((Date.now() - record.receivedAt) / 1000)}s ago`;
-      lastTriageOutput.textContent = `received ${age} (kind=${record.kind})\n\n${JSON.stringify(record, null, 2)}`;
-    }
-  } catch (err) {
-    lastTriageOutput.textContent = `client error: ${err instanceof Error ? err.message : String(err)}`;
-  } finally {
-    lastTriageButton.disabled = false;
-  }
-});
-
-// Fetch the initial count when the page loads
-fetchInitialCount();
+void fetchInit();
+void loadTriage();
+void loadAction();

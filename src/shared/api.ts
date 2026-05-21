@@ -150,6 +150,45 @@ export type LastTriageResponse = {
   record: TriageRecord | null;
 };
 
+export type ActionKind = "approve" | "deny" | "mute" | "archive";
+
+export const ACTION_KINDS: readonly ActionKind[] = [
+  "approve",
+  "deny",
+  "mute",
+  "archive",
+];
+
+export type ActionRecord =
+  | {
+      kind: "success";
+      action: ActionKind;
+      conversationId: string;
+      username: string | null;
+      details: string;
+      latencyMs: number;
+      receivedAt: number;
+    }
+  | {
+      kind: "error";
+      action: ActionKind;
+      conversationId: string;
+      error: string;
+      latencyMs: number;
+      receivedAt: number;
+    }
+  | {
+      kind: "skipped";
+      conversationId: string;
+      reason: string;
+      receivedAt: number;
+    };
+
+export type LastActionResponse = {
+  type: "lastAction";
+  record: ActionRecord | null;
+};
+
 export const ApiEndpoint = {
   Init: "/api/init",
   Increment: "/api/increment",
@@ -157,6 +196,7 @@ export const ApiEndpoint = {
   GeminiPing: "/api/gemini-ping",
   LastModMail: "/api/last-modmail",
   LastTriage: "/api/last-triage",
+  LastAction: "/api/last-action",
   OnPostCreate: "/internal/menu/post-create",
   OnAppInstall: "/internal/on-app-install",
   OnModMail: "/internal/on-modmail",

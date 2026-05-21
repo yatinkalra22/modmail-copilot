@@ -9,6 +9,8 @@ import {
   ApiEndpoint,
   MODMAIL_INTENTS,
   SUGGESTED_ACTIONS,
+  type ActionKind,
+  type ActionRecord,
   type DecrementRequest,
   type DecrementResponse,
   type GeminiPingResponse,
@@ -16,6 +18,7 @@ import {
   type IncrementRequest,
   type IncrementResponse,
   type InitResponse,
+  type LastActionResponse,
   type LastModMailResponse,
   type LastTriageResponse,
   type ModmailIntent,
@@ -72,6 +75,9 @@ async function onRequest(
     case ApiEndpoint.LastTriage:
       body = await onLastTriage();
       break;
+    case ApiEndpoint.LastAction:
+      body = await onLastAction();
+      break;
     case ApiEndpoint.OnPostCreate:
       body = await onMenuNewPost();
       break;
@@ -96,10 +102,15 @@ type ApiResponse =
   | DecrementResponse
   | GeminiPingResponse
   | LastModMailResponse
-  | LastTriageResponse;
+  | LastTriageResponse
+  | LastActionResponse;
 
 const LAST_MODMAIL_KEY = "spike:last-modmail";
 const LAST_TRIAGE_KEY = "spike:last-triage";
+const LAST_ACTION_KEY = "spike:last-action";
+const triageByConvoKey = (convoId: string) => `triage:convo:${convoId}`;
+const processedMsgKey = (msgId: string) => `processed:msg:${msgId}`;
+const MOD_NOTE_MARKER = "🤖 AI Triage";
 
 type ErrorResponse = {
   error: string;
@@ -436,6 +447,194 @@ async function runTriage(payload: OnModMailRequest): Promise<TriageRecord> {
 }
 
 
+function formatModNote(
+  triage: TriageResult,
+  userContext: UserContext,
+): string {
+  const confidencePct = Math.round(triage.confidence * 100);
+  const banFlag = userContext.isCurrentlyBanned ? ", currently banned" : "";
+  const quotedDraft = triage.draftReply
+    .split("\n")
+    .map((line) => `> ${line}`)
+    .join("\n");
+  return [
+    `${MOD_NOTE_MARKER} (${confidencePct}% confidence)`,
+    "",
+    `- **Intent:** \`${triage.intent}\``,
+    `- **Summary:** ${triage.summary}`,
+    `- **User:** u/${userContext.username} — ${userContext.accountAgeDays}d old, karma ${userContext.karma}${banFlag}, recent comments in sub: ${userContext.recentCommentsInSub}`,
+    `- **Suggested action:** \`${triage.suggestedAction}\``,
+    "",
+    "**Draft reply (edit before sending):**",
+    quotedDraft,
+    "",
+    "**One-click actions** — reply *privately* with one of:",
+    "- `!approve` — unban this user + archive",
+    "- `!deny` — send the draft above as a public reply + archive",
+    "- `!mute` — mute 72h + archive",
+    "- `!archive` — archive only",
+    "",
+    "_AI suggestion only. A human moderator decides._",
+  ].join("\n");
+}
+
+function parseSentinel(body: string): ActionKind | null {
+  const first = body.trim().split(/\s+/, 1)[0]?.toLowerCase() ?? "";
+  if (first === "!approve") return "approve";
+  if (first === "!deny") return "deny";
+  if (first === "!mute") return "mute";
+  if (first === "!archive") return "archive";
+  return null;
+}
+
+function isOwnModNote(body: string): boolean {
+  return body.trim().startsWith(MOD_NOTE_MARKER);
+}
+
+async function runAction(
+  payload: OnModMailRequest,
+  action: ActionKind,
+): Promise<ActionRecord> {
+  const receivedAt = Date.now();
+  const startedAt = receivedAt;
+  const conversationId = stripModmailPrefix(payload.conversationId);
+  const subredditName = context.subredditName;
+
+  try {
+    const { conversation } = await reddit.modMail.getConversation({
+      conversationId,
+      markRead: false,
+    });
+    const username = conversation?.participant?.name ?? null;
+
+    if (action === "approve") {
+      if (!username) throw new Error("could not resolve participant username");
+      if (!subredditName) throw new Error("no subreddit context");
+      await reddit.unbanUser(username, subredditName);
+      await reddit.modMail.archiveConversation(conversationId);
+      return {
+        kind: "success",
+        action,
+        conversationId,
+        username,
+        details: `unbanned u/${username} from r/${subredditName} + archived`,
+        latencyMs: Date.now() - startedAt,
+        receivedAt,
+      };
+    }
+
+    if (action === "deny") {
+      const triageRaw = await redis.get(triageByConvoKey(conversationId));
+      if (!triageRaw) {
+        throw new Error(
+          "no stored triage for this conversation; draft unavailable",
+        );
+      }
+      const stored = JSON.parse(triageRaw) as TriageRecord;
+      if (stored.kind !== "success") {
+        throw new Error(`stored triage kind=${stored.kind}, no draft`);
+      }
+      await reddit.modMail.reply({
+        conversationId,
+        body: stored.triage.draftReply,
+        isInternal: false,
+      });
+      await reddit.modMail.archiveConversation(conversationId);
+      return {
+        kind: "success",
+        action,
+        conversationId,
+        username,
+        details: "posted AI draft reply (public) + archived",
+        latencyMs: Date.now() - startedAt,
+        receivedAt,
+      };
+    }
+
+    if (action === "mute") {
+      await reddit.modMail.muteConversation({
+        conversationId,
+        numHours: 72,
+      });
+      await reddit.modMail.archiveConversation(conversationId);
+      return {
+        kind: "success",
+        action,
+        conversationId,
+        username,
+        details: "muted 72h + archived",
+        latencyMs: Date.now() - startedAt,
+        receivedAt,
+      };
+    }
+
+    if (action === "archive") {
+      await reddit.modMail.archiveConversation(conversationId);
+      return {
+        kind: "success",
+        action,
+        conversationId,
+        username,
+        details: "archived",
+        latencyMs: Date.now() - startedAt,
+        receivedAt,
+      };
+    }
+
+    action satisfies never;
+    throw new Error(`unreachable action: ${action as string}`);
+  } catch (err) {
+    return {
+      kind: "error",
+      action,
+      conversationId,
+      error: err instanceof Error ? err.message : String(err),
+      latencyMs: Date.now() - startedAt,
+      receivedAt,
+    };
+  }
+}
+
+async function postModNote(
+  conversationId: string,
+  triage: TriageResult,
+  userContext: UserContext,
+): Promise<void> {
+  try {
+    await reddit.modMail.reply({
+      conversationId,
+      body: formatModNote(triage, userContext),
+      isInternal: true,
+    });
+  } catch (err) {
+    console.error(
+      "[mod note post failed]",
+      err instanceof Error ? err.stack : err,
+    );
+  }
+}
+
+async function fetchMessageBody(
+  conversationId: string,
+  messageId: string,
+): Promise<string> {
+  try {
+    const { conversation } = await reddit.modMail.getConversation({
+      conversationId,
+      markRead: false,
+    });
+    const messagesById = conversation?.messages ?? {};
+    const msg = messagesById[messageId] ?? Object.values(messagesById).pop();
+    return msg?.bodyMarkdown ?? msg?.body ?? "";
+  } catch (err) {
+    console.error(
+      "[fetch message body failed]",
+      err instanceof Error ? err.stack : err,
+    );
+    return "";
+  }
+}
+
 async function onModMailTrigger(req: IncomingMessage): Promise<TriggerResponse> {
   let payload: OnModMailRequest;
   try {
@@ -453,20 +652,70 @@ async function onModMailTrigger(req: IncomingMessage): Promise<TriggerResponse> 
     JSON.stringify({ receivedAt: Date.now(), payload }),
   );
 
-  const skipReason = checkSkipReason(payload);
-  let record: TriageRecord;
-  if (skipReason) {
-    record = {
-      kind: "skipped",
-      reason: skipReason,
-      conversationId: stripModmailPrefix(payload.conversationId),
-      receivedAt: Date.now(),
-    };
-  } else {
-    record = await runTriage(payload);
+  const conversationId = stripModmailPrefix(payload.conversationId);
+  const messageId = stripModmailPrefix(payload.messageId);
+
+  const alreadyProcessed = await redis.get(processedMsgKey(messageId));
+  if (alreadyProcessed) {
+    console.log("[modmail trigger] dedup", messageId);
+    return {};
   }
-  console.log("[triage]", record.kind, JSON.stringify(record));
-  await redis.set(LAST_TRIAGE_KEY, JSON.stringify(record));
+  await redis.set(processedMsgKey(messageId), "1");
+
+  const authorTypeLower = payload.messageAuthorType.toLowerCase();
+  const isParticipant = authorTypeLower.includes("participant_user");
+  const isMod = authorTypeLower.includes("moderator");
+
+  if (isParticipant) {
+    const skipReason = checkSkipReason(payload);
+    let record: TriageRecord;
+    if (skipReason) {
+      record = {
+        kind: "skipped",
+        reason: skipReason,
+        conversationId,
+        receivedAt: Date.now(),
+      };
+    } else {
+      record = await runTriage(payload);
+      if (record.kind === "success") {
+        await postModNote(
+          conversationId,
+          record.triage,
+          record.input.userContext,
+        );
+        await redis.set(
+          triageByConvoKey(conversationId),
+          JSON.stringify(record),
+        );
+      }
+    }
+    console.log("[triage]", record.kind, JSON.stringify(record));
+    await redis.set(LAST_TRIAGE_KEY, JSON.stringify(record));
+    return {};
+  }
+
+  if (isMod) {
+    const body = await fetchMessageBody(conversationId, messageId);
+    if (isOwnModNote(body)) {
+      console.log("[modmail trigger] own mod note, skip");
+      return {};
+    }
+    const action = parseSentinel(body);
+    if (!action) {
+      console.log("[modmail trigger] mod reply without sentinel, skip");
+      return {};
+    }
+    const actionRecord = await runAction(payload, action);
+    console.log("[action]", actionRecord.kind, JSON.stringify(actionRecord));
+    await redis.set(LAST_ACTION_KEY, JSON.stringify(actionRecord));
+    return {};
+  }
+
+  console.log(
+    "[modmail trigger] unknown author type",
+    payload.messageAuthorType,
+  );
   return {};
 }
 
@@ -488,6 +737,14 @@ async function onLastTriage(): Promise<LastTriageResponse> {
     return { type: "lastTriage", record: null };
   }
   return { type: "lastTriage", record: JSON.parse(raw) as TriageRecord };
+}
+
+async function onLastAction(): Promise<LastActionResponse> {
+  const raw = await redis.get(LAST_ACTION_KEY);
+  if (!raw) {
+    return { type: "lastAction", record: null };
+  }
+  return { type: "lastAction", record: JSON.parse(raw) as ActionRecord };
 }
 
 async function onMenuNewPost(): Promise<UiResponse> {

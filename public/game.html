@@ -10,26 +10,86 @@
     <title>devvit</title>
   </head>
   <body class="app">
-    <img class="snoo" src="/snoo.png" alt="Snoo" />
-    <div class="content">
-      <h1 class="title" id="title"></h1>
-      <p class="description">
-        Edit <span class="code">src/client/game.ts</span> to get started.
+    <header class="hero">
+      <div class="hero-badge">🤖</div>
+      <h1 class="hero-title">Modmail Copilot</h1>
+      <p class="hero-subtitle">
+        AI-powered modmail triage. Suggestions only — a human moderator decides.
       </p>
-    </div>
-    <div class="counter-row">
-      <button class="counter-button" id="decrement-button">-</button>
-      <span class="counter-value" id="counter-value">0</span>
-      <button class="counter-button" id="increment-button">+</button>
-    </div>
-    <div class="gemini-ping">
-      <button class="counter-button" id="gemini-ping-button">Ping Gemini</button>
-      <pre id="gemini-ping-output" class="gemini-ping-output"></pre>
-      <button class="counter-button" id="last-modmail-button">Show last modmail trigger</button>
-      <pre id="last-modmail-output" class="gemini-ping-output"></pre>
-      <button class="counter-button" id="last-triage-button">Show last triage</button>
-      <pre id="last-triage-output" class="gemini-ping-output"></pre>
-    </div>
+      <p class="hero-greeting" id="title"></p>
+    </header>
+
+    <main class="dashboard">
+      <section class="card card-primary" id="triage-card">
+        <header class="card-header">
+          <h2 class="card-title">Latest triage</h2>
+          <button class="refresh-button" id="last-triage-button" aria-label="Refresh triage">↻</button>
+        </header>
+        <div class="card-empty" id="triage-empty">
+          No triage yet. Send a modmail to the sub from a non-mod account.
+        </div>
+        <div class="triage-view" id="triage-view" hidden>
+          <div class="triage-meta">
+            <span class="intent-badge" id="triage-intent">—</span>
+            <span class="confidence" id="triage-confidence">—</span>
+            <span class="age" id="triage-age">—</span>
+          </div>
+          <p class="triage-summary" id="triage-summary"></p>
+          <div class="triage-user" id="triage-user"></div>
+          <div class="triage-action">
+            <span class="action-label">Suggested action</span>
+            <code class="action-value" id="triage-action"></code>
+          </div>
+          <div class="triage-draft">
+            <span class="draft-label">Draft reply</span>
+            <blockquote class="draft-body" id="triage-draft"></blockquote>
+          </div>
+          <details class="triage-raw">
+            <summary>Raw record</summary>
+            <pre id="triage-raw"></pre>
+          </details>
+        </div>
+      </section>
+
+      <section class="card" id="action-card">
+        <header class="card-header">
+          <h2 class="card-title">Latest action</h2>
+          <button class="refresh-button" id="last-action-button" aria-label="Refresh action">↻</button>
+        </header>
+        <div class="card-empty" id="action-empty">
+          No actions yet. Reply privately to a triaged modmail with
+          <code>!approve</code>, <code>!deny</code>, <code>!mute</code>, or
+          <code>!archive</code>.
+        </div>
+        <div class="action-view" id="action-view" hidden>
+          <div class="action-row">
+            <span class="action-kind" id="action-kind">—</span>
+            <span class="action-status" id="action-status">—</span>
+            <span class="age" id="action-age">—</span>
+          </div>
+          <p class="action-details" id="action-details"></p>
+          <details class="action-raw">
+            <summary>Raw record</summary>
+            <pre id="action-raw"></pre>
+          </details>
+        </div>
+      </section>
+
+      <section class="card">
+        <header class="card-header">
+          <h2 class="card-title">Diagnostics</h2>
+        </header>
+        <div class="diag-row">
+          <button class="pill-button" id="gemini-ping-button">Ping Gemini</button>
+          <button class="pill-button pill-secondary" id="last-modmail-button">
+            Show last raw trigger
+          </button>
+        </div>
+        <pre id="gemini-ping-output" class="diag-output"></pre>
+        <pre id="last-modmail-output" class="diag-output"></pre>
+      </section>
+    </main>
+
     <footer class="footer">
       <div class="docs-link" tabindex="0" id="docs-link">Docs</div>
       <span class="divider">|</span>
@@ -37,6 +97,11 @@
       <span class="divider">|</span>
       <div class="docs-link" tabindex="0" id="discord-link">Discord</div>
     </footer>
+
+    <span hidden id="counter-value">0</span>
+    <button hidden id="increment-button"></button>
+    <button hidden id="decrement-button"></button>
+
     <script type="module" src="game.js" defer></script>
   </body>
 </html>

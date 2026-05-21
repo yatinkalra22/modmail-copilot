@@ -10,16 +10,25 @@
     <title>devvit</title>
   </head>
   <body class="app">
-    <img class="snoo" src="/snoo.png" alt="Snoo" />
-    <div class="content">
-      <h1 class="title" id="title"></h1>
-      <p class="description">
-        Edit <span class="code">src/client/splash.ts</span> to get started.
+    <main class="card">
+      <div class="brand">
+        <span class="brand-mark">🤖</span>
+        <h1 class="brand-title">Modmail Copilot</h1>
+      </div>
+      <p class="tagline">
+        AI-powered triage for your modmail. Each incoming message gets a
+        mod-only note with intent, user context, and a draft reply.
       </p>
-    </div>
-    <div>
-      <button class="start-button" id="start-button">Start</button>
-    </div>
+      <ol class="how">
+        <li><span class="step">1</span> User sends modmail → AI triages in seconds.</li>
+        <li><span class="step">2</span> Private mod note appears with intent, summary, draft reply.</li>
+        <li><span class="step">3</span> Reply <code>!approve</code> / <code>!deny</code> / <code>!mute</code> / <code>!archive</code> to act.</li>
+      </ol>
+      <button class="start-button" id="start-button">Open Dashboard</button>
+      <p class="suggestion-only">
+        AI suggestion only. A human moderator always decides.
+      </p>
+    </main>
     <footer class="footer">
       <div class="docs-link" tabindex="0" id="docs-link">Docs</div>
       <span class="divider">|</span>
