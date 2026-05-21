@@ -4,6 +4,9 @@
   "permissions": {
     "http": {
       "domains": ["generativelanguage.googleapis.com"]
+    },
+    "reddit": {
+      "scope": "moderator"
     }
   },
   "settings": {
@@ -44,7 +47,8 @@
     ]
   },
   "triggers": {
-    "onAppInstall": "/internal/on-app-install"
+    "onAppInstall": "/internal/on-app-install",
+    "onModMail": "/internal/on-modmail"
   },
   "scripts": {
     "dev": "node --experimental-strip-types ./tools/build.ts --watch",

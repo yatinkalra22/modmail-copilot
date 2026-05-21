@@ -51,13 +51,115 @@ export type GeminiPingResponse =
       latencyMs: number;
     };
 
+export type LastModMailResponse = {
+  type: "lastModMail";
+  payload: JsonValue | null;
+  receivedAt: number | null;
+};
+
+export type ModmailIntent =
+  | "ban_appeal"
+  | "question"
+  | "report"
+  | "spam"
+  | "hostile"
+  | "other";
+
+export type SuggestedAction =
+  | "approve_unban"
+  | "deny_with_reason"
+  | "escalate"
+  | "mute_and_archive"
+  | "reply_normally";
+
+export const MODMAIL_INTENTS: readonly ModmailIntent[] = [
+  "ban_appeal",
+  "question",
+  "report",
+  "spam",
+  "hostile",
+  "other",
+];
+
+export const SUGGESTED_ACTIONS: readonly SuggestedAction[] = [
+  "approve_unban",
+  "deny_with_reason",
+  "escalate",
+  "mute_and_archive",
+  "reply_normally",
+];
+
+export interface TriageResult {
+  intent: ModmailIntent;
+  summary: string;
+  confidence: number;
+  suggestedAction: SuggestedAction;
+  draftReply: string;
+}
+
+export interface UserContext {
+  username: string;
+  accountAgeDays: number;
+  karma: number;
+  isCurrentlyBanned: boolean;
+  isApproved: boolean;
+  recentCommentsInSub: number;
+}
+
+export type TriageFailureStage =
+  | "fetch-conversation"
+  | "missing-key"
+  | "fetch"
+  | "http"
+  | "parse"
+  | "validate";
+
+export type TriageInput = {
+  conversationId: string;
+  messageBody: string;
+  userContext: UserContext;
+};
+
+export type TriageRecord =
+  | {
+      kind: "skipped";
+      reason: string;
+      conversationId: string;
+      receivedAt: number;
+    }
+  | {
+      kind: "success";
+      input: TriageInput;
+      triage: TriageResult;
+      rawText: string;
+      latencyMs: number;
+      receivedAt: number;
+    }
+  | {
+      kind: "error";
+      stage: TriageFailureStage;
+      error: string;
+      latencyMs: number;
+      receivedAt: number;
+      input?: TriageInput;
+      rawText?: string;
+    };
+
+export type LastTriageResponse = {
+  type: "lastTriage";
+  record: TriageRecord | null;
+};
+
 export const ApiEndpoint = {
   Init: "/api/init",
   Increment: "/api/increment",
   Decrement: "/api/decrement",
   GeminiPing: "/api/gemini-ping",
+  LastModMail: "/api/last-modmail",
+  LastTriage: "/api/last-triage",
   OnPostCreate: "/internal/menu/post-create",
   OnAppInstall: "/internal/on-app-install",
+  OnModMail: "/internal/on-modmail",
 } as const;
 
 export type ApiEndpoint = (typeof ApiEndpoint)[keyof typeof ApiEndpoint];

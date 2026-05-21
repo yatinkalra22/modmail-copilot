@@ -6,6 +6,8 @@ import {
   type IncrementRequest,
   type IncrementResponse,
   type InitResponse,
+  type LastModMailResponse,
+  type LastTriageResponse,
 } from "../shared/api.ts";
 import { navigateTo } from "@devvit/web/client";
 
@@ -123,6 +125,63 @@ geminiPingButton.addEventListener("click", async () => {
     geminiPingOutput.textContent = `client error: ${err instanceof Error ? err.message : String(err)}`;
   } finally {
     geminiPingButton.disabled = false;
+  }
+});
+
+const lastModmailButton = document.getElementById(
+  "last-modmail-button",
+) as HTMLButtonElement;
+const lastModmailOutput = document.getElementById(
+  "last-modmail-output",
+) as HTMLPreElement;
+
+lastModmailButton.addEventListener("click", async () => {
+  lastModmailButton.disabled = true;
+  lastModmailOutput.textContent = "Fetching…";
+  try {
+    const response = await fetch(ApiEndpoint.LastModMail);
+    const data = (await response.json()) as LastModMailResponse;
+    if (data.payload == null) {
+      lastModmailOutput.textContent =
+        "No modmail trigger received yet. Send a modmail to the sub.";
+    } else {
+      const age = data.receivedAt
+        ? `${Math.round((Date.now() - data.receivedAt) / 1000)}s ago`
+        : "unknown";
+      lastModmailOutput.textContent = `received ${age}\n\n${JSON.stringify(data.payload, null, 2)}`;
+    }
+  } catch (err) {
+    lastModmailOutput.textContent = `client error: ${err instanceof Error ? err.message : String(err)}`;
+  } finally {
+    lastModmailButton.disabled = false;
+  }
+});
+
+const lastTriageButton = document.getElementById(
+  "last-triage-button",
+) as HTMLButtonElement;
+const lastTriageOutput = document.getElementById(
+  "last-triage-output",
+) as HTMLPreElement;
+
+lastTriageButton.addEventListener("click", async () => {
+  lastTriageButton.disabled = true;
+  lastTriageOutput.textContent = "Fetching…";
+  try {
+    const response = await fetch(ApiEndpoint.LastTriage);
+    const data = (await response.json()) as LastTriageResponse;
+    const record = data.record;
+    if (record == null) {
+      lastTriageOutput.textContent =
+        "No triage yet. Send a modmail from a non-mod account.";
+    } else {
+      const age = `${Math.round((Date.now() - record.receivedAt) / 1000)}s ago`;
+      lastTriageOutput.textContent = `received ${age} (kind=${record.kind})\n\n${JSON.stringify(record, null, 2)}`;
+    }
+  } catch (err) {
+    lastTriageOutput.textContent = `client error: ${err instanceof Error ? err.message : String(err)}`;
+  } finally {
+    lastTriageButton.disabled = false;
   }
 });
 

@@ -1,12 +1,14 @@
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { context, reddit, redis, settings } from "@devvit/web/server";
 import type {
-  PartialJsonValue,
+  OnModMailRequest,
   TriggerResponse,
   UiResponse,
 } from "@devvit/web/shared";
 import {
   ApiEndpoint,
+  MODMAIL_INTENTS,
+  SUGGESTED_ACTIONS,
   type DecrementRequest,
   type DecrementResponse,
   type GeminiPingResponse,
@@ -14,6 +16,13 @@ import {
   type IncrementRequest,
   type IncrementResponse,
   type InitResponse,
+  type LastModMailResponse,
+  type LastTriageResponse,
+  type ModmailIntent,
+  type SuggestedAction,
+  type TriageRecord,
+  type TriageResult,
+  type UserContext,
 } from "../shared/api.ts";
 import { once } from "node:events";
 
@@ -26,7 +35,7 @@ export async function serverOnRequest(
   } catch (err) {
     const msg = `server error; ${err instanceof Error ? err.stack : err}`;
     console.error(msg);
-    writeJSON<ErrorResponse>(500, { error: msg, status: 500 }, rsp);
+    writeJSON(500, { error: msg, status: 500 }, rsp);
   }
 }
 
@@ -37,7 +46,7 @@ async function onRequest(
   const url = req.url;
 
   if (!url || url === "/") {
-    writeJSON<ErrorResponse>(404, { error: "not found", status: 404 }, rsp);
+    writeJSON(404, { error: "not found", status: 404 }, rsp);
     return;
   }
 
@@ -57,11 +66,20 @@ async function onRequest(
     case ApiEndpoint.GeminiPing:
       body = await onGeminiPing();
       break;
+    case ApiEndpoint.LastModMail:
+      body = await onLastModMail();
+      break;
+    case ApiEndpoint.LastTriage:
+      body = await onLastTriage();
+      break;
     case ApiEndpoint.OnPostCreate:
       body = await onMenuNewPost();
       break;
     case ApiEndpoint.OnAppInstall:
       body = await onAppInstall();
+      break;
+    case ApiEndpoint.OnModMail:
+      body = await onModMailTrigger(req);
       break;
     default:
       endpoint satisfies never;
@@ -69,14 +87,19 @@ async function onRequest(
       break;
   }
 
-  writeJSON<PartialJsonValue>("status" in body ? body.status : 200, body, rsp);
+  writeJSON("status" in body ? body.status : 200, body, rsp);
 }
 
 type ApiResponse =
   | InitResponse
   | IncrementResponse
   | DecrementResponse
-  | GeminiPingResponse;
+  | GeminiPingResponse
+  | LastModMailResponse
+  | LastTriageResponse;
+
+const LAST_MODMAIL_KEY = "spike:last-modmail";
+const LAST_TRIAGE_KEY = "spike:last-triage";
 
 type ErrorResponse = {
   error: string;
@@ -136,14 +159,22 @@ async function onDecrement(req: IncomingMessage): Promise<DecrementResponse> {
   };
 }
 
-async function onGeminiPing(): Promise<GeminiPingResponse> {
+type GeminiCallResult =
+  | { ok: true; data: JsonValue; rawText: string; latencyMs: number }
+  | {
+      ok: false;
+      stage: "missing-key" | "fetch" | "http" | "parse";
+      error: string;
+      latencyMs: number;
+    };
+
+async function callGemini(prompt: string): Promise<GeminiCallResult> {
   const started = Date.now();
   const elapsed = () => Date.now() - started;
 
   const apiKey = await settings.get<string>("GEMINI_API_KEY");
   if (!apiKey) {
     return {
-      type: "geminiPing",
       ok: false,
       stage: "missing-key",
       error: "GEMINI_API_KEY is not set. Run `devvit settings set GEMINI_API_KEY`.",
@@ -152,8 +183,6 @@ async function onGeminiPing(): Promise<GeminiPingResponse> {
   }
 
   const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${encodeURIComponent(apiKey)}`;
-  const prompt =
-    'Reply with the exact JSON object {"ping":"pong"} and nothing else.';
 
   let res: Response;
   try {
@@ -170,7 +199,6 @@ async function onGeminiPing(): Promise<GeminiPingResponse> {
     });
   } catch (err) {
     return {
-      type: "geminiPing",
       ok: false,
       stage: "fetch",
       error: err instanceof Error ? err.message : String(err),
@@ -181,7 +209,6 @@ async function onGeminiPing(): Promise<GeminiPingResponse> {
   if (!res.ok) {
     const detail = await res.text().catch(() => "");
     return {
-      type: "geminiPing",
       ok: false,
       stage: "http",
       error: `HTTP ${res.status}: ${detail.slice(0, 500)}`,
@@ -196,23 +223,271 @@ async function onGeminiPing(): Promise<GeminiPingResponse> {
     };
     rawText = data.candidates?.[0]?.content?.parts?.[0]?.text ?? "";
     const stripped = rawText.replace(/^```(?:json)?\s*|\s*```$/g, "").trim();
-    const reply = JSON.parse(stripped) as JsonValue;
     return {
-      type: "geminiPing",
       ok: true,
-      reply,
+      data: JSON.parse(stripped) as JsonValue,
       rawText,
       latencyMs: elapsed(),
     };
   } catch (err) {
     return {
-      type: "geminiPing",
       ok: false,
       stage: "parse",
       error: `${err instanceof Error ? err.message : String(err)} | raw=${rawText.slice(0, 200)}`,
       latencyMs: elapsed(),
     };
   }
+}
+
+async function onGeminiPing(): Promise<GeminiPingResponse> {
+  const result = await callGemini(
+    'Reply with the exact JSON object {"ping":"pong"} and nothing else.',
+  );
+  if (result.ok) {
+    return {
+      type: "geminiPing",
+      ok: true,
+      reply: result.data,
+      rawText: result.rawText,
+      latencyMs: result.latencyMs,
+    };
+  }
+  return {
+    type: "geminiPing",
+    ok: false,
+    stage: result.stage,
+    error: result.error,
+    latencyMs: result.latencyMs,
+  };
+}
+
+function stripModmailPrefix(id: string): string {
+  return id.replace(/^Modmail(?:Conversation|Message)_/, "");
+}
+
+function checkSkipReason(payload: OnModMailRequest): string | null {
+  if (payload.conversationType !== "sr_user") {
+    return `conversationType=${payload.conversationType}`;
+  }
+  if (!payload.messageAuthorType.endsWith("PARTICIPANT_USER")) {
+    return `messageAuthorType=${payload.messageAuthorType}`;
+  }
+  if (payload.isAutoGenerated) {
+    return "isAutoGenerated=true";
+  }
+  if (payload.conversationState !== "new") {
+    return `conversationState=${payload.conversationState}`;
+  }
+  return null;
+}
+
+function buildTriagePrompt(
+  messageBody: string,
+  userContext: UserContext,
+): string {
+  return `You are a Reddit moderation assistant. A user sent a modmail to a subreddit. Triage it.
+
+USER CONTEXT
+- Username: u/${userContext.username}
+- Account age: ${userContext.accountAgeDays} days
+- Karma: ${userContext.karma}
+- Currently banned from this sub: ${userContext.isCurrentlyBanned}
+- Approved user: ${userContext.isApproved}
+- Recent comments by this user in this sub: ${userContext.recentCommentsInSub}
+
+MODMAIL MESSAGE
+${messageBody}
+
+Respond with ONLY a JSON object of this exact shape (no markdown, no fences, no commentary):
+
+{
+  "intent": one of "ban_appeal" | "question" | "report" | "spam" | "hostile" | "other",
+  "summary": string, max 2 sentences,
+  "confidence": number, 0.0 to 1.0,
+  "suggestedAction": one of "approve_unban" | "deny_with_reason" | "escalate" | "mute_and_archive" | "reply_normally",
+  "draftReply": string, short editable reply, polite and direct
+}
+
+You suggest only. A human moderator always decides. Never imply a decision is final.`;
+}
+
+function isValidTriage(data: unknown): data is TriageResult {
+  if (!data || typeof data !== "object") return false;
+  const d = data as Record<string, unknown>;
+  return (
+    typeof d.intent === "string" &&
+    MODMAIL_INTENTS.includes(d.intent as ModmailIntent) &&
+    typeof d.summary === "string" &&
+    typeof d.confidence === "number" &&
+    d.confidence >= 0 &&
+    d.confidence <= 1 &&
+    typeof d.suggestedAction === "string" &&
+    SUGGESTED_ACTIONS.includes(d.suggestedAction as SuggestedAction) &&
+    typeof d.draftReply === "string"
+  );
+}
+
+async function runTriage(payload: OnModMailRequest): Promise<TriageRecord> {
+  const receivedAt = Date.now();
+  const startedAt = receivedAt;
+  const conversationId = stripModmailPrefix(payload.conversationId);
+  const messageId = stripModmailPrefix(payload.messageId);
+
+  try {
+    const { conversation, user } = await reddit.modMail.getConversation({
+      conversationId,
+      markRead: false,
+    });
+
+    if (!conversation) {
+      return {
+        kind: "error",
+        stage: "fetch-conversation",
+        error: "no conversation returned",
+        latencyMs: Date.now() - startedAt,
+        receivedAt,
+      };
+    }
+
+    const messagesById = conversation.messages ?? {};
+    const message =
+      messagesById[messageId] ?? Object.values(messagesById)[0];
+    const messageBody = message?.bodyMarkdown ?? message?.body ?? "";
+
+    const username =
+      payload.messageAuthor?.name ?? user?.name ?? "(unknown)";
+    const createdMs = user?.created
+      ? new Date(user.created).getTime()
+      : Number.NaN;
+    const accountAgeDays = Number.isFinite(createdMs)
+      ? Math.floor((Date.now() - createdMs) / 86_400_000)
+      : 0;
+    const karma = payload.messageAuthor?.karma ?? 0;
+    const isCurrentlyBanned =
+      user?.banStatus?.isBanned ?? payload.messageAuthor?.banned ?? false;
+    const isApproved = user?.approveStatus?.isApproved ?? false;
+    const recentCommentsInSub = Object.keys(user?.recentComments ?? {}).length;
+
+    const userContext: UserContext = {
+      username,
+      accountAgeDays,
+      karma,
+      isCurrentlyBanned,
+      isApproved,
+      recentCommentsInSub,
+    };
+
+    const input = { conversationId, messageBody, userContext };
+
+    if (!messageBody) {
+      return {
+        kind: "error",
+        stage: "fetch-conversation",
+        error: "message body was empty after fetch",
+        latencyMs: Date.now() - startedAt,
+        receivedAt,
+        input,
+      };
+    }
+
+    const prompt = buildTriagePrompt(messageBody, userContext);
+    const geminiResult = await callGemini(prompt);
+
+    if (!geminiResult.ok) {
+      return {
+        kind: "error",
+        stage: geminiResult.stage,
+        error: geminiResult.error,
+        latencyMs: Date.now() - startedAt,
+        receivedAt,
+        input,
+      };
+    }
+
+    if (!isValidTriage(geminiResult.data)) {
+      return {
+        kind: "error",
+        stage: "validate",
+        error: `invalid triage shape: ${JSON.stringify(geminiResult.data).slice(0, 300)}`,
+        latencyMs: Date.now() - startedAt,
+        receivedAt,
+        input,
+        rawText: geminiResult.rawText,
+      };
+    }
+
+    return {
+      kind: "success",
+      input,
+      triage: geminiResult.data,
+      rawText: geminiResult.rawText,
+      latencyMs: Date.now() - startedAt,
+      receivedAt,
+    };
+  } catch (err) {
+    return {
+      kind: "error",
+      stage: "fetch-conversation",
+      error: err instanceof Error ? err.message : String(err),
+      latencyMs: Date.now() - startedAt,
+      receivedAt,
+    };
+  }
+}
+
+
+async function onModMailTrigger(req: IncomingMessage): Promise<TriggerResponse> {
+  let payload: OnModMailRequest;
+  try {
+    payload = await readJSON<OnModMailRequest>(req);
+  } catch (err) {
+    console.error(
+      "[modmail trigger] parse error",
+      err instanceof Error ? err.stack : err,
+    );
+    return {};
+  }
+  console.log("[modmail trigger]", JSON.stringify(payload));
+  await redis.set(
+    LAST_MODMAIL_KEY,
+    JSON.stringify({ receivedAt: Date.now(), payload }),
+  );
+
+  const skipReason = checkSkipReason(payload);
+  let record: TriageRecord;
+  if (skipReason) {
+    record = {
+      kind: "skipped",
+      reason: skipReason,
+      conversationId: stripModmailPrefix(payload.conversationId),
+      receivedAt: Date.now(),
+    };
+  } else {
+    record = await runTriage(payload);
+  }
+  console.log("[triage]", record.kind, JSON.stringify(record));
+  await redis.set(LAST_TRIAGE_KEY, JSON.stringify(record));
+  return {};
+}
+
+async function onLastModMail(): Promise<LastModMailResponse> {
+  const raw = await redis.get(LAST_MODMAIL_KEY);
+  if (!raw) {
+    return { type: "lastModMail", payload: null, receivedAt: null };
+  }
+  const { receivedAt, payload } = JSON.parse(raw) as {
+    receivedAt: number;
+    payload: JsonValue;
+  };
+  return { type: "lastModMail", payload, receivedAt };
+}
+
+async function onLastTriage(): Promise<LastTriageResponse> {
+  const raw = await redis.get(LAST_TRIAGE_KEY);
+  if (!raw) {
+    return { type: "lastTriage", record: null };
+  }
+  return { type: "lastTriage", record: JSON.parse(raw) as TriageRecord };
 }
 
 async function onMenuNewPost(): Promise<UiResponse> {
@@ -231,9 +506,9 @@ async function onAppInstall(): Promise<TriggerResponse> {
   return {};
 }
 
-function writeJSON<T extends PartialJsonValue>(
+function writeJSON(
   status: number,
-  json: Readonly<T>,
+  json: unknown,
   rsp: ServerResponse,
 ): void {
   const body = JSON.stringify(json);

@@ -11,9 +11,10 @@
   display: flex;
   position: relative;
   flex-direction: column;
-  justify-content: center;
+  justify-content: flex-start;
   align-items: center;
-  height: 100vh;
+  min-height: 100vh;
+  padding: 24px 0 64px;
   margin: 0;
   gap: 16px;
 }
