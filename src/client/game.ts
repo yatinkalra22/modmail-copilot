@@ -2,6 +2,7 @@ import {
   ApiEndpoint,
   type DecrementRequest,
   type DecrementResponse,
+  type GeminiPingResponse,
   type IncrementRequest,
   type IncrementResponse,
   type InitResponse,
@@ -103,6 +104,27 @@ incrementButton.addEventListener("click", () =>
 decrementButton.addEventListener("click", () =>
   updateCounter("decrement", decrementAmount),
 );
+
+const geminiPingButton = document.getElementById(
+  "gemini-ping-button",
+) as HTMLButtonElement;
+const geminiPingOutput = document.getElementById(
+  "gemini-ping-output",
+) as HTMLPreElement;
+
+geminiPingButton.addEventListener("click", async () => {
+  geminiPingButton.disabled = true;
+  geminiPingOutput.textContent = "Calling Gemini…";
+  try {
+    const response = await fetch(ApiEndpoint.GeminiPing, { method: "POST" });
+    const data = (await response.json()) as GeminiPingResponse;
+    geminiPingOutput.textContent = JSON.stringify(data, null, 2);
+  } catch (err) {
+    geminiPingOutput.textContent = `client error: ${err instanceof Error ? err.message : String(err)}`;
+  } finally {
+    geminiPingButton.disabled = false;
+  }
+});
 
 // Fetch the initial count when the page loads
 fetchInitialCount();

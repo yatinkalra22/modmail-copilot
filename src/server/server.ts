@@ -1,5 +1,5 @@
 import type { IncomingMessage, ServerResponse } from "node:http";
-import { context, reddit, redis } from "@devvit/web/server";
+import { context, reddit, redis, settings } from "@devvit/web/server";
 import type {
   PartialJsonValue,
   TriggerResponse,
@@ -9,6 +9,8 @@ import {
   ApiEndpoint,
   type DecrementRequest,
   type DecrementResponse,
+  type GeminiPingResponse,
+  type JsonValue,
   type IncrementRequest,
   type IncrementResponse,
   type InitResponse,
@@ -52,6 +54,9 @@ async function onRequest(
     case ApiEndpoint.Decrement:
       body = await onDecrement(req);
       break;
+    case ApiEndpoint.GeminiPing:
+      body = await onGeminiPing();
+      break;
     case ApiEndpoint.OnPostCreate:
       body = await onMenuNewPost();
       break;
@@ -67,7 +72,11 @@ async function onRequest(
   writeJSON<PartialJsonValue>("status" in body ? body.status : 200, body, rsp);
 }
 
-type ApiResponse = InitResponse | IncrementResponse | DecrementResponse;
+type ApiResponse =
+  | InitResponse
+  | IncrementResponse
+  | DecrementResponse
+  | GeminiPingResponse;
 
 type ErrorResponse = {
   error: string;
@@ -125,6 +134,85 @@ async function onDecrement(req: IncomingMessage): Promise<DecrementResponse> {
     postId,
     count,
   };
+}
+
+async function onGeminiPing(): Promise<GeminiPingResponse> {
+  const started = Date.now();
+  const elapsed = () => Date.now() - started;
+
+  const apiKey = await settings.get<string>("GEMINI_API_KEY");
+  if (!apiKey) {
+    return {
+      type: "geminiPing",
+      ok: false,
+      stage: "missing-key",
+      error: "GEMINI_API_KEY is not set. Run `devvit settings set GEMINI_API_KEY`.",
+      latencyMs: elapsed(),
+    };
+  }
+
+  const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${encodeURIComponent(apiKey)}`;
+  const prompt =
+    'Reply with the exact JSON object {"ping":"pong"} and nothing else.';
+
+  let res: Response;
+  try {
+    res = await fetch(url, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        contents: [{ parts: [{ text: prompt }] }],
+        generationConfig: {
+          temperature: 0,
+          responseMimeType: "application/json",
+        },
+      }),
+    });
+  } catch (err) {
+    return {
+      type: "geminiPing",
+      ok: false,
+      stage: "fetch",
+      error: err instanceof Error ? err.message : String(err),
+      latencyMs: elapsed(),
+    };
+  }
+
+  if (!res.ok) {
+    const detail = await res.text().catch(() => "");
+    return {
+      type: "geminiPing",
+      ok: false,
+      stage: "http",
+      error: `HTTP ${res.status}: ${detail.slice(0, 500)}`,
+      latencyMs: elapsed(),
+    };
+  }
+
+  let rawText = "";
+  try {
+    const data = (await res.json()) as {
+      candidates?: { content?: { parts?: { text?: string }[] } }[];
+    };
+    rawText = data.candidates?.[0]?.content?.parts?.[0]?.text ?? "";
+    const stripped = rawText.replace(/^```(?:json)?\s*|\s*```$/g, "").trim();
+    const reply = JSON.parse(stripped) as JsonValue;
+    return {
+      type: "geminiPing",
+      ok: true,
+      reply,
+      rawText,
+      latencyMs: elapsed(),
+    };
+  } catch (err) {
+    return {
+      type: "geminiPing",
+      ok: false,
+      stage: "parse",
+      error: `${err instanceof Error ? err.message : String(err)} | raw=${rawText.slice(0, 200)}`,
+      latencyMs: elapsed(),
+    };
+  }
 }
 
 async function onMenuNewPost(): Promise<UiResponse> {

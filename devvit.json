@@ -1,6 +1,21 @@
 {
   "$schema": "https://developers.reddit.com/schema/config-file.v1.json",
   "name": "modmail-copilot",
+  "permissions": {
+    "http": {
+      "domains": ["generativelanguage.googleapis.com"]
+    }
+  },
+  "settings": {
+    "global": {
+      "GEMINI_API_KEY": {
+        "type": "string",
+        "label": "Gemini API key",
+        "helpText": "Google AI Studio key used by the triage spike. Set via `devvit settings set GEMINI_API_KEY`.",
+        "isSecret": true
+      }
+    }
+  },
   "post": {
     "dir": "public",
     "entrypoints": {
